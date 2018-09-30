@@ -1,2 +1,2 @@
-# Ucore-os
-os experiments and final projects
+# Ucore-OS-experiment
+course projects and final project of Operating System

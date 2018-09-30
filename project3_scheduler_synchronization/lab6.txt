@@ -1,0 +1,179 @@
+#project 3 report
+
+##[lab6]
+
+###[exercise1]使用 Round Robin 调度算法（不需要编码）
+
+请理解并分析sched_calss中各个函数指针的用法，并接合Round Robin 调度算法描ucore的调度执行过程:
+
+Round Robin 调度算法是一种让所有runnable态进程轮流使用CPU时间的算法。RR调度器会维护一个存储所有当前runnable态进程的队列。然后分配给队列首位进程固定大小的时间片以供其运行，如果时间片运行结束后该进程任务执行完毕，那么从队列中删除该进程，如果没有执行完毕，就将该进程放到队列尾端。反复分配时间片直到队列中所有进程任务执行完毕。
+
+1. 进程队列的初始化。
+```
+static void
+RR_init(struct run_queue *rq) {
+    list_init(&(rq->run_list));
+    rq->proc_num = 0;
+}
+```
+
+2. RR_enqueue进入队列（在队首进程未执行完毕需要放入末尾时使用）：把某进程的进程控制块指针放入到rq队列末尾，当进程控制块的时间片为0，重置它为rq成员变量max_time_slice。如果进程在当前的执行时间片已经用完，这个操作可以让它在下一次时间片到来是继续执行。
+```
+static void
+RR_enqueue(struct run_queue *rq, struct proc_struct *proc) {
+    assert(list_empty(&(proc->run_link)));
+    list_add_before(&(rq->run_list), &(proc->run_link));
+    if (proc->time_slice == 0 || proc->time_slice > rq->max_time_slice) {
+        proc->time_slice = rq->max_time_slice;
+    }
+    proc->rq = rq;
+    rq->proc_num ++;
+}
+```
+
+3. RR_dequeue删除队列首端元素：把就绪进程队列rq的进程控制块指针的队列元素删除，然后proc_num表示进程数量，减一
+```
+static void
+RR_dequeue(struct run_queue *rq, struct proc_struct *proc) {
+    assert(!list_empty(&(proc->run_link)) && proc->rq == rq);
+    list_del_init(&(proc->run_link));
+    rq->proc_num --;
+}
+```
+
+4. RR_pick_next，选取下一个需要执行的进程（位于队首）：选取rq中的队首元素，并把队列元素转换成进程控制块指针
+```
+static struct proc_struct *
+RR_pick_next(struct run_queue *rq) {
+    list_entry_t *le = list_next(&(rq->run_list));
+    if (le != &(rq->run_list)) {
+        return le2proc(le, run_link);
+    }
+    return NULL;
+}
+```
+
+5. RR_proc_tick，每一次timer时间到后，会调用该函数，然后时间片减一，时间片降到零说明该进程未执行完毕，需要把标示need_resched置为1.下一次执行trap函数时候，如果need_resched=1，那么会把当前执行进程放到队列末尾，然后继续执行队列首位进程。
+```
+static void
+RR_proc_tick(struct run_queue *rq, struct proc_struct *proc) {
+    if (proc->time_slice > 0) {
+        proc->time_slice --;
+    }
+    if (proc->time_slice == 0) {
+        proc->need_resched = 1;
+    }
+}
+```
+
+6. 一个类，提供调度算法的切换接口
+```
+struct sched_class default_sched_class = {
+    .name = "RR_scheduler",
+    .init = RR_init,
+    .enqueue = RR_enqueue,
+    .dequeue = RR_dequeue,
+    .pick_next = RR_pick_next,
+    .proc_tick = RR_proc_tick,
+};
+```
+
+
+请在实验报告中简要说明如何设计实现”多级反馈队列调度算法“，给出概要设计，鼓励给出详细设计:
+原理：
+多级反馈队列算法中，当一个新进程进入内存后，首先将它放入第一个队列，按fcfs原则使用RR调度执行，如果在一个时间片内执行完毕，就撤离系统。如果在一个时间片内执行不完，就把该进程放入第二个队列RR执行，第二个队列中的时间片运行好还执行不完，就放到第三个队列，这个第三个队列可以不是RR调度，而是FCFS调度，以保证这个进程能执行完，当然，设置更多的队列也是可行的，每个队列的时间片长度也可以递增，取决于实际情况。
+设计：
+在RR代码的基础上，初始化三个队列，第一个队列就是原来代码的队列，原来RR程序时间片耗尽执行enqueue操作时，enqueue对象改为下一个队列（最后一个队列是FCFS逻辑的，不存在时间片耗尽），dequeue和原来一样。然后直到原来的RR调度把第一队列执行空了，就转到第二队列执行，然后第三队列。
+
+
+###[exercise2] 实现 Stride Scheduling 调度算法（需要编码）:
+
+1. 先定义比较器
+```
+/* LAB6: YOUR CODE */
+#define BIG_STRIDE    0x7FFFFFFF /* 定义一个大数 */
+
+/* The compare function for two skew_heap_node_t's and the
+ * corresponding procs*/
+static int
+proc_stride_comp_f(void *a, void *b)
+{
+     struct proc_struct *p = le2proc(a, lab6_run_pool);
+     struct proc_struct *q = le2proc(b, lab6_run_pool);
+     int32_t c = p->lab6_stride - q->lab6_stride;
+     if (c > 0) return 1;
+     else if (c == 0) return 0;
+     else return -1;
+}
+```
+
+2. 然后初始化运行队列，初始化调度器类信息，初始化当前队列为空，设置proc_num为0
+```
+static void
+stride_init(struct run_queue *rq) {
+     /*?LAB6:?YOUR?CODE?*/?
+    list_init(&(rq->run_list));
+    rq->lab6_run_pool = NULL;
+    rq->proc_num = 0;
+}
+```
+
+3. 入队
+```
+static void
+stride_enqueue(struct run_queue *rq, struct proc_struct *proc) {
+    /*?LAB6:?YOUR?CODE?*/?
+    rq->lab6_run_pool = skew_heap_insert(
+        rq->lab6_run_pool, &(proc->lab6_run_pool), proc_stride_comp_f);
+    if (proc->time_slice == 0 || proc->time_slice > rq->max_time_slice) {
+        proc->time_slice = rq->max_time_slice;
+    }
+    proc->rq = rq;
+    rq->proc_num ++;
+}
+```
+
+4. 出队
+```
+static void
+stride_dequeue(struct run_queue *rq, struct proc_struct *proc) {
+     /*?LAB6:?YOUR?CODE?*/?
+    rq->lab6_run_pool = skew_heap_remove(rq->lab6_run_pool, &(proc->lab6_run_pool), proc_stride_comp_f);
+    proc->rq = NULL;
+    rq->proc_num --;
+}
+```
+
+5. 选择进程调度
+```
+static struct proc_struct *
+stride_pick_next(struct run_queue *rq) {
+     /*?LAB6:?YOUR?CODE?*/?
+    assert(rq != NULL);
+    if (rq->lab6_run_pool == NULL) {
+        return NULL;
+    } else {
+        struct proc_struct *proc = le2proc(rq->lab6_run_pool, lab6_run_pool);
+        assert(proc->lab6_priority > 0);
+        proc->lab6_stride += BIG_STRIDE / proc->lab6_priority;
+        return proc;
+    }
+}
+```
+
+6. 时间片原理和RR一样
+```
+static void
+stride_proc_tick(struct run_queue *rq, struct proc_struct *proc) {
+     /*?LAB6:?YOUR?CODE?*/?
+     if (proc->time_slice > 0) {
+         proc->time_slice --;
+     }
+     if (proc->time_slice == 0) {
+         proc->need_resched = 1;
+     }
+}
+```
+
+7. 算法切换接口已给出
+

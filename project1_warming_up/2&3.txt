@@ -1,0 +1,214 @@
+##[练习2]
+[练习2.1]从CPU加电后执行的第一条指令开始，单步跟踪BIOS的执行。
+     
+在lab1/tools/gdbinit文件中加入这样一行指令：
+
+'''
+set architecture i8086      
+'''
+
+然后控制台 make debug
+
+此时gdb界面被打开，输入：si， 可以单步跟踪BIOS执行
+
+[练习2.2]在初始化位置0x7c00设置实地址断点,测试断点正常。
+
+在lab1/tools/gdbinit文件末尾加入这样指令：
+
+'''
+	set architecture i8086  
+		b *0x7c00  
+		continue
+'''
+
+控制台 make debug
+
+此时gdb界面被打开，输入：
+
+'''
+	x /5i $pc
+'''
+
+可以读取当前断点的5行汇编代码，读取如下：
+
+'''
+	(gdb) x /5i $pc
+    => 	0x7c00 <start>:      cli    
+   	0x7c01 <start+1>:    cld    
+   	0x7c02 <start+2>:    xor    %eax,%eax
+   	0x7c04 <start+4>:    mov    %eax,%ds
+   	0x7c06 <start+6>:    mov    %eax,%es
+'''
+
+[练习2.3]从0x7c00开始跟踪代码运行,将单步跟踪反汇编得到的代码与bootasm.S和 bootblock.asm进行比较。
+
+在调用qemu 时增加-d in_asm -D q.log 参数，得到q.log文件，其中如下代码与bootasm.s和bootblock.asm相同
+
+'''
+	----------------
+	IN: 
+	0x00007c00:  cli    
+	
+	----------------
+	IN: 
+	0x00007c01:  cld    
+	0x00007c02:  xor    %ax,%ax
+	0x00007c04:  mov    %ax,%ds
+	0x00007c06:  mov    %ax,%es
+	0x00007c08:  mov    %ax,%ss
+	
+	----------------
+	IN: 
+	0x00007c0a:  in     $0x64,%al
+	
+	----------------
+	IN: 
+	0x00007c0c:  test   $0x2,%al
+	0x00007c0e:  jne    0x7c0a
+	
+	----------------
+	IN: 
+	0x00007c10:  mov    $0xd1,%al
+	0x00007c12:  out    %al,$0x64
+	0x00007c14:  in     $0x64,%al
+	0x00007c16:  test   $0x2,%al
+	0x00007c18:  jne    0x7c14
+	
+	----------------
+	IN: 
+	0x00007c1a:  mov    $0xdf,%al
+	0x00007c1c:  out    %al,$0x60
+	0x00007c1e:  lgdtw  0x7c6c
+	0x00007c23:  mov    %cr0,%eax
+	0x00007c26:  or     $0x1,%eax
+	0x00007c2a:  mov    %eax,%cr0
+	
+	----------------
+	IN: 
+	0x00007c2d:  ljmp   $0x8,$0x7c32
+	
+	----------------
+	IN: 
+	0x00007c32:  mov    $0x10,%ax
+	0x00007c36:  mov    %eax,%ds
+	
+	----------------
+	IN: 
+	0x00007c38:  mov    %eax,%es
+	
+	----------------
+	IN: 
+	0x00007c3a:  mov    %eax,%fs
+	0x00007c3c:  mov    %eax,%gs
+	0x00007c3e:  mov    %eax,%ss
+	
+	----------------
+	IN: 
+	0x00007c40:  mov    $0x0,%ebp
+	
+	----------------
+	IN: 
+	0x00007c45:  mov    $0x7c00,%esp
+	0x00007c4a:  call   0x7d0d
+	
+	----------------
+	IN: 
+	0x00007d0d:  push   %ebp
+'''
+	
+[练习2.4]自己找一个bootloader或内核中的代码位置，设置断点并进行测试。
+选择 0x7c10位置，操作如问题2，得到对应位置断点以及断点处代码：
+
+'''
+Breakpoint 2, seta20 () at boot/bootasm.S:34
+=> 0x7c10 <seta20.1+6>: mov    $0xd1,%al
+   0x7c12 <seta20.1+8>: out    %al,$0x64
+   0x7c14 <seta20.2>:   in     $0x64,%al
+   0x7c16 <seta20.2+2>: test   $0x2,%al
+   0x7c18 <seta20.2+4>: jne    0x7c14 <seta20.2>
+'''
+
+
+##[练习3]
+
+bootloader的进入地址为0x7c00,进入后初始化变量与环境：
+
+'''
+# start address should be 0:7c00, in real mode, the beginning address of the running bootloader
+.globl start
+start:
+.code16                                             # Assemble for 16-bit mode
+    cli                                             # Disable interrupts
+    cld                                             # String operations increment
+
+    # Set up the important data segment registers (DS, ES, SS).
+    xorw %ax, %ax                                   # Segment number zero
+    movw %ax, %ds                                   # -> Data Segment
+    movw %ax, %es                                   # -> Extra Segment
+    movw %ax, %ss                                   # -> Stack Segment
+'''
+
+开启A20，可启用32根内存线，以及访问内存空间：
+
+'''
+    # Enable A20:
+    #  For backwards compatibility with the earliest PCs, physical
+    #  address line 20 is tied low, so that addresses higher than
+    #  1MB wrap around to zero by default. This code undoes this.
+seta20.1:
+    inb $0x64, %al                                  # Wait for not busy(8042 input buffer empty).
+    testb $0x2, %al
+    jnz seta20.1
+
+    movb $0xd1, %al                                 # 0xd1 -> port 0x64
+    outb %al, $0x64                                 # 0xd1 means: write data to 8042's P2 port
+
+seta20.2:
+    inb $0x64, %al                                  # Wait for not busy(8042 input buffer empty).
+    testb $0x2, %al
+    jnz seta20.2
+
+    movb $0xdf, %al                                 # 0xdf -> port 0x60
+    outb %al, $0x60                                 # 0xdf = 11011111, means set P2's A20 bit(the 1 bit) to 1
+'''
+
+如下代码初始化了gdt表，载入静态存储在引导区的gdt表，并且gei$cr0赋值为1，开启保护模式：
+
+'''
+    # Switch from real to protected mode, using a bootstrap GDT
+    # and segment translation that makes virtual addresses
+    # identical to physical addresses, so that the
+    # effective memory map does not change during the switch.
+    lgdt gdtdesc
+    movl %cr0, %eax
+    orl $CR0_PE_ON, %eax
+    movl %eax, %cr0
+'''
+
+更新cs基地址：
+
+'''
+    # Jump to next instruction, but in 32-bit code segment.
+    # Switches processor into 32-bit mode.
+    ljmp $PROT_MODE_CSEG, $protcseg
+.code32                                             # Assemble for 32-bit mode
+protcseg:
+'''
+
+设置段寄存器：
+
+'''
+    # Set up the protected-mode data segment registers
+    movw $PROT_MODE_DSEG, %ax                       # Our data segment selector
+    movw %ax, %ds                                   # -> DS: Data Segment
+    movw %ax, %es                                   # -> ES: Extra Segment
+    movw %ax, %fs                                   # -> FS
+    movw %ax, %gs                                   # -> GS
+    movw %ax, %ss                                   # -> SS: Stack Segment
+'''
+
+进入保护模式，回到bootmain：
+
+'''
+    call bootmain
+'''

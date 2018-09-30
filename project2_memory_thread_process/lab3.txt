@@ -1,0 +1,87 @@
+#project 2 report
+
+##[lab3]
+
+###[exercise1]给未被映射的地址映射上物理页
+
+请在实验报告中简要说明你的设计实现过程:
+
+我们的目标是在do_pgfault中，处理页的缺失，可以使用get_pte来获得相应的页表项，如果PT不存在，那么就生成一个PT，代码如下：
+
+```
+    if ((ptep = get_pte(mm->pgdir, addr, 1)) == NULL) {
+        cprintf("get_pte in do_pgfault failed\n");
+        goto failed;
+    }
+```
+如果物理地址不存在，那么调整页表项，使得其正确指向页面，对应物理地址和逻辑地址：
+```
+    if (*ptep == 0) { 
+        if (pgdir_alloc_page(mm->pgdir, addr, perm) == NULL) {
+            cprintf("pgdir_alloc_page in do_pgfault failed\n");
+            goto failed;
+        }
+    }
+```
+
+请描述页目录项（Pag Director Entry）和页表（Page Table Entry）中组成部分对ucore实现页替换算法的潜在用处:
+
+Pag Director Entry 指向储存页表的页面，结构与页表项相同，通过查看mmu.h以及网上资料，得到定义：
+```
+#define PTE_P           0x001                   // Present 对应物理页面是否存在
+#define PTE_W           0x002                   // Writeable 对应物理页面是否可写
+#define PTE_U           0x004                   // User 对应物理页面用户态是否可以访问
+#define PTE_PWT         0x008                   // Write-Through 对应物理页面在写入时是否写透(即向更低级储存设备写入)
+#define PTE_PCD         0x010                   // Cache-Disable 对应物理页面是否能被放入高速缓存
+#define PTE_A           0x020                   // Accessed 对应物理页面是否被访问
+#define PTE_D           0x040                   // Dirty 对应物理页面是否被写入
+#define PTE_PS          0x080                   // Page Size 对应物理页面的页面大小
+#define PTE_MBZ         0x180                   // Bits must be zero 必须为零的部分
+#define PTE_AVAIL       0xE00                   // Available for software use 用户可自定义的部分
+```
+这是页表项的功能位，在页替换算法中起到管理作用
+
+如果ucore的缺页服务例程在执行过程中访问内存，出现了页访问异常，请问硬件要做哪些事情？
+
+根据trap.c文件中的解释，当出现页访问异常时，eflags，cs寄存器的值，eip的值和错误码都会被push入栈中，涉及用户态内核态之间的切换时，会在push前面几个值之前, 更换一个栈, 然后push进ss的值和esp的值。异常访问地址存储在cr2寄存器中。
+
+###[exercise2]补充完成基于FIFO的页面替换算法
+
+请在实验报告中简要说明你的设计实现过程:
+
+在do_pgfault()函数中实现了页面换入的操作。使用swap_out_vistim()这个函数实现页面换出。
+FIFO即first in first out。我们将使用一个队列，使得越早被加载到内存的页面越早被换出。
+
+```
+    else { 
+        if(swap_init_ok) {
+            struct Page *page=NULL;
+            if ((ret = swap_in(mm, addr, &page)) != 0) {
+                cprintf("swap_in in do_pgfault failed\n");
+                goto failed;
+            }    
+            page_insert(mm->pgdir, page, addr, perm);
+            swap_map_swappable(mm, addr, page, 1);
+            page->pra_vaddr = addr;
+        }
+        else {
+            cprintf("no swap_init_ok but ptep is %x, failed\n",*ptep);
+            goto failed;
+        }
+   }
+```
+如果要在ucore上实现"extended clock页替换算法"请给你的设计方案, 现有的swap_manager框架是否足以支持在ucore中实现此算法?如果是, 请给你的设计方案
+
+可以。现有swap队列已经成环，可以不做改动，对map_swappable 和 swap_out_vistim做修改即可。
+
+需要被换出的页的特征是什么?
+
+PTE_A = 0， PTE_D = 0， 代表物理页面没有被访问和写入。
+
+在ucore中如何判断具有这样特征的页？
+
+如练习1中我列的列表，判断页表项的第5,6位是否为0（从第0位开始算）。
+
+何时进行换入和换出操作?
+
+发生缺页异常的同时页表项存在且允许换入，那么就执行换入操作，如果当前没有可用的物理页面，就该换出。

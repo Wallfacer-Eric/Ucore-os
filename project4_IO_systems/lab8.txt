@@ -1,0 +1,268 @@
+#project 4 report
+
+##[lab8]
+
+###[exercise1]完成读文件操作的实现（需要编码）
+
+首先了解打开文件的处理流程，然后参考本实验后续的文件读写操作的过程分析，编写在sfs_inode.c中sfs_io_nolock读文件中数据的实现代码。
+?
+因为数据不一定与block对齐，分成三段读取,先读取头部的数据。计算第一个数据块的大小，然后找到内存文件索引对应的block的编号ino。接着完成实际的读写操作，修改buf，blkno，nblks的值。nblks是读写块的大小，如果读写块的大小不为0，那么size就等于块大小-块偏移量，如果为0，size。blkno是块号
+
+```
+    if ((blkoff = offset % SFS_BLKSIZE) != 0) {
+        size = (nblks != 0) ? (SFS_BLKSIZE - blkoff) : (endpos - offset);
+        if ((ret = sfs_bmap_load_nolock(sfs, sin, blkno, &ino)) != 0) {
+            goto out;
+        }
+        if ((ret = sfs_buf_op(sfs, buf, size, ino, blkoff)) != 0) {
+            goto out;
+        }
+        alen += size;
+        if (nblks == 0) {
+            goto out;
+        }
+        buf += size, blkno ++, nblks --;
+    }
+```
+
+接下来读取中间部分的数据，按照块依次读，每块大小为size。SFS_BLKSIZE是文件系统的块大小，以块为基准的偏移量。通过目录的inode和在inode中块的逻辑指数，发现硬盘块的编号ino，执行实际的文件读写操作，和上面的差不多。
+
+```
+    size = SFS_BLKSIZE;
+    while (nblks != 0) {
+        if ((ret = sfs_bmap_load_nolock(sfs, sin, blkno, &ino)) != 0) {
+            goto out;
+        }
+        if ((ret = sfs_block_op(sfs, buf, ino, 1)) != 0) {
+            goto out;
+        }
+        alen += size, buf += size, blkno ++, nblks --;
+    }
+```
+读取第三部分数据,这一部分是第二部分整块读取后剩下的残余数据
+```
+    if ((size = endpos % SFS_BLKSIZE) != 0) {
+        if ((ret = sfs_bmap_load_nolock(sfs, sin, blkno, &ino)) != 0) {
+            goto out;
+        }
+        if ((ret = sfs_buf_op(sfs, buf, size, ino, 0)) != 0) {
+            goto out;
+        }
+        alen += size;
+    }
+```
+
+请在实验报告中给出设计实现”UNIX的PIPE机制“的概要设方案，鼓励给出详细设计方案
+UNIX的PIPE机制：
+1、管道（pipe）
+管道是进程间通信的主要手段之一。一个管道实际上就是个只存在于内存中的文件，对这个文件的操作要通过两个已经打开文件进行，它们分别代表管道的两端。管道是一种特殊的文件，它不属于某一种文件系统，而是一种独立的文件系统，有其自己的数据结构。根据管道的适用范围将其分为：无名管道和命名管道。
+2、环形缓冲区
+每个管道只有一个页面作为缓冲区，该页面是按照环形缓冲区的方式来使用的。这种访问方式是典型的“生产者——消费者”模型。当“生产者”进程有大量的数据需要写时，而且每当写满一个页面就需要进行睡眠等待，等待“消费者”从管道中读走一些数据，为其腾出一些空间。
+3?并发访问
+考虑到在不同环境下，任务可能对环形缓冲区的访问情况不同，需要对并发访问的情况进行分析。
+在单任务环境下，只存在一个读任务和一个写任务，只要保证写任务可以顺利的完成将数据写入，而读任务可以及时的将数据读出即可。如果有竞争发生，可能会出现如下情况：
+Case1：假如写任务在“写指针加1，指向下一个可写空位置”执行完成时被打断，如图3所示，此时写指针write指向非法位置。当系统调度读任务执行时，如果读任务需要读多个数据，那么不但应该读出的数据被读出，而且当读指针被调整为0是，会将以前已经读出的数据重复读出。
+Case2：假设读任务进行读操作，在“读指针加1”执行完时被打断，如图4所示，此时read所处的位置是非法的。当系统调度写任务执行时，如果写任务要写多个数据，那么当写指针指到尾部时，本来缓冲区应该为满状态，不能再写，但是由于读指针处于非法位置，在读任务执行前，写任务会任务缓冲区为空，继续进行写操作，将覆盖还没有来的及读出的数据。
+为了避免上述错误的发生，必须保证读写指针操作是原子性的，读写指针的值要么是没有修改的，要么是修改正确的。可以引入信号量，有效的保护临界区代码，就可以避免这些问题。在单任务环境下，也可以通过采取适当的措施来避免信号量的使用，从而提高程序的执行效率。
+4.linux内核中pipe的读写实现
+Linux内核中采用struct pipe_inode_info结构体来描述一个管道。其中，当pipe为空/满时，采用等待队列，该队列使用自旋锁进行保护。用struct Pipe_buffer数据结构描述pipe的缓冲（buffer）
+
+PIPE可以看做是一种特殊的文件, 一个进程将内容写到这个文件当中, 另一个进程从这个文件当中读出内容, 这同时也是符合之前操作系统讲到的read-write系统. 因此只需要实现关于这个特殊文件的read, write, open和close函数即可
+
+
+###[exercise2]完成基于文件系统的执行程序机制的实现（需要编码）
+
+进行初始化操作。
+1）建立内存管理器
+```
+    if (current->mm != NULL) {
+        panic("load_icode: current->mm must be empty.\n");
+    }
+    int ret = -E_NO_MEM;
+    struct mm_struct *mm;
+    if ((mm = mm_create()) == NULL) {
+        goto bad_mm;
+    }
+```
+2）建立页目录
+```
+    if (setup_pgdir(mm) != 0) {
+        goto bad_pgdir_cleanup_mm;
+    }
+    struct Page *page;
+```
+3）从文件加载到内存
+```
+    struct elfhdr __elf, *elf = &__elf;
+    //(3.1) get the file header of the bianry program (ELF format)
+    // struct elfhdr *elf = (struct elfhdr *)binary;
+    //(3.2) get the entry of the program section headers of the bianry program (ELF format)
+    struct elfhdr __elf, *elf = &__elf;
+    if ((ret = load_icode_read(fd, elf, sizeof(struct elfhdr), 0)) != 0) {
+        goto bad_elf_cleanup_pgdir;
+    }
+    // struct proghdr *ph = (struct proghdr *)(binary + elf->e_phoff);
+    //(3.3) This program is valid?
+    if (elf->e_magic != ELF_MAGIC) {
+        ret = -E_INVAL_ELF;
+        goto bad_elf_cleanup_pgdir;
+    }
+
+    uint32_t vm_flags, perm;
+    struct proghdr __ph, *ph = &__ph;
+```
+我们需要把一个程序的代码段、数据段以及程序运行所需要的部分从磁盘读取到内存之中。
+```
+off = start - la 
+size = PGSIZE - off 
+la += PGSIZE
+```
+上面的三段就是我们读取的方式。off是校准量，size就是我们每一次读取的大小。我们刚才读取的是每一段中的代码段和数据段部分。 
+我们分配的内存一般要比要从磁盘中读取的数据要大，所以要将剩余的部分赋值为0。
+```
+    uint32_t phnum;
+    for (phnum = 0; phnum < elf->e_phnum; phnum ++) {
+        off_t phoff = elf->e_phoff + sizeof(struct proghdr) * phnum;
+        if ((ret = load_icode_read(fd, ph, sizeof(struct proghdr), phoff)) != 0) {
+            goto bad_cleanup_mmap;
+        }
+        if (ph->p_type != ELF_PT_LOAD) {
+            continue ;
+        }
+        if (ph->p_filesz > ph->p_memsz) {
+            ret = -E_INVAL_ELF;
+            goto bad_cleanup_mmap;
+        }
+        if (ph->p_filesz == 0) {
+            continue ;
+        }
+        vm_flags = 0, perm = PTE_U;
+        if (ph->p_flags & ELF_PF_X) vm_flags |= VM_EXEC;
+        if (ph->p_flags & ELF_PF_W) vm_flags |= VM_WRITE;
+        if (ph->p_flags & ELF_PF_R) vm_flags |= VM_READ;
+        if (vm_flags & VM_WRITE) perm |= PTE_W;
+        if ((ret = mm_map(mm, ph->p_va, ph->p_memsz, vm_flags, NULL)) != 0) {
+            goto bad_cleanup_mmap;
+        }
+        // unsigned char *from = binary + ph->p_offset;
+        off_t offset = ph->p_offset;
+        size_t off, size;
+        uintptr_t start = ph->p_va, end, la = ROUNDDOWN(start, PGSIZE);
+
+        ret = -E_NO_MEM;
+        end = ph->p_va + ph->p_filesz;
+        while (start < end) {
+            if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL) {
+                goto bad_cleanup_mmap;
+            }
+            off = start - la, size = PGSIZE - off, la += PGSIZE;
+            if (end < la) {
+                size -= la - end;
+            }
+            // memcpy(page2kva(page) + off, from, size);
+            load_icode_read(fd, page2kva(page) + off, size, offset);
+            start += size, offset += size;
+        }
+        end = ph->p_va + ph->p_memsz;
+        if (start < la) {
+            /* ph->p_memsz == ph->p_filesz */
+            if (start == end) {
+                continue ;
+            }
+            off = start + PGSIZE - la, size = PGSIZE - off;
+            if (end < la) {
+                size -= la - end;
+            }
+            memset(page2kva(page) + off, 0, size);
+            start += size;
+            assert((end < la && start == end) || (end >= la && start == la));
+        }
+        while (start < end) {
+            if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL) {
+                goto bad_cleanup_mmap;
+            }
+            off = start - la, size = PGSIZE - off, la += PGSIZE;
+            if (end < la) {
+                size -= la - end;
+            }
+            memset(page2kva(page) + off, 0, size);
+            start += size;
+        }
+    }
+    sysfile_close(fd);
+```
+4)建立相应的虚拟内存映射表
+```
+    vm_flags = VM_READ | VM_WRITE | VM_STACK;
+    if ((ret = mm_map(mm, USTACKTOP - USTACKSIZE, USTACKSIZE, vm_flags, NULL)) != 0) {
+        goto bad_cleanup_mmap;
+    }
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP-PGSIZE , PTE_USER) != NULL);
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP-2*PGSIZE , PTE_USER) != NULL);
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP-3*PGSIZE , PTE_USER) != NULL);
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP-4*PGSIZE , PTE_USER) != NULL);
+```
+5)设置用户栈
+```
+    mm_count_inc(mm);
+    current->mm = mm;
+    current->cr3 = PADDR(mm->pgdir);
+    lcr3(PADDR(mm->pgdir));
+```
+6)处理用户栈中传入的参数，其中argc对应的是参数个数,argv[]对应参数的具体内容的地址
+```
+    uint32_t argv_size=0, i;
+    for (i = 0; i < argc; i ++) {
+        argv_size += strnlen(kargv[i],EXEC_MAX_ARG_LEN + 1)+1;
+    }
+
+    uintptr_t stacktop = USTACKTOP - (argv_size/sizeof(long)+1)*sizeof(long);
+    char** uargv=(char **)(stacktop  - argc * sizeof(char *));
+
+    argv_size = 0;
+    for (i = 0; i < argc; i ++) {
+        uargv[i] = strcpy((char *)(stacktop + argv_size ), kargv[i]);
+        argv_size +=  strnlen(kargv[i],EXEC_MAX_ARG_LEN + 1)+1;
+    }
+
+    stacktop = (uintptr_t)uargv - sizeof(int);
+    *(int *)stacktop = argc;
+```
+7)设置进程的中断帧
+```
+    struct trapframe *tf = current->tf;
+    memset(tf, 0, sizeof(struct trapframe));
+    tf->tf_cs = USER_CS;
+    tf->tf_ds = tf->tf_es = tf->tf_ss = USER_DS;
+    tf->tf_esp = stacktop;
+    assert((tf->tf_eip = elf->e_entry) != 0);
+    tf->tf_eflags |= FL_IF;
+    ret = 0;
+out:
+    return ret;
+bad_cleanup_mmap:
+    exit_mmap(mm);
+bad_elf_cleanup_pgdir:
+    put_pgdir(mm);
+bad_pgdir_cleanup_mm:
+    mm_destroy(mm);
+bad_mm:
+    goto out;
+```
+
+请在实验报告中给出设计实现基于”UNIX的硬链接和软链接机制“的概要设方案，鼓励给出详细设计方案
+
+定义：
+(1)硬链接：当创建一个文件或是目录的硬链接时就是在目录里面创建一个新的目录项，目录项的名字和原来被连接的对象名字不同，但是inode结点的值是一样的
+(2)软链接：创建的新的目录项的名字和inode值和原来的对象都不一样
+限制：
+硬链接：
+a.不能对目录创建硬链接，因为会导致不能返回父目录
+b.不能对不同的文件系统创建硬链接，因为在不同的分区下，即便是同一个inode，对应不同的block块
+软链接：
+a.可以对目录创建软链接，遍历操作会忽略目录的软链接。 
+b:可以跨文件系统。对文件创建一个软链接，那么这个文件的内容在unix系统中是链接对象的路径名.
+
+设计方案：
+一个软链接对应一个新的索引节点, 其中的块储存被链接文件的绝对路径; 而硬链接对应着一个目录, 其中的编号就是被链接文件的数据块索引值。
+
